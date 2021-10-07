@@ -6,7 +6,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <pal_serial.h>
-#include <termios.h>
+#include <asm/termbits.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <stdlib.h>

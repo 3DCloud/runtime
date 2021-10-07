@@ -3,7 +3,8 @@
 
 #include "pal_types.h"
 #include "pal_utilities.h"
-#include <termios.h>
+#include <asm/ioctls.h>
+#include <asm/termbits.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -239,7 +240,7 @@ static speed_t SystemIoPortsNative_TermiosSpeed2Rate(int speed)
     case 50:
         return B50;
     }
-    return B0;
+    return BOTHER;
 }
 
 static int SystemIoPortsNative_TermiosRate2Speed(speed_t brate)
@@ -338,19 +339,25 @@ static int SystemIoPortsNative_TermiosRate2Speed(speed_t brate)
 int32_t SystemIoPortsNative_TermiosGetSpeed(intptr_t handle)
 {
     int fd = ToFileDescriptor(handle);
-    struct termios term;
-    if (tcgetattr(fd, &term) < 0)
+    struct termios2 term;
+    if (ioctl(fd, TCGETS2, &term) < 0)
     {
         return  -1;
     }
 
-    return SystemIoPortsNative_TermiosRate2Speed(cfgetispeed(&term));
+    speed_t rate = term.c_cflag & CBAUD;
+
+    if (rate == BOTHER) {
+        return term.c_ispeed;
+    } else {
+        return SystemIoPortsNative_TermiosRate2Speed(rate);
+    }
 }
 
 int32_t SystemIoPortsNative_TermiosSetSpeed(intptr_t handle, int32_t speed)
 {
     int fd = ToFileDescriptor(handle);
-    struct termios term;
+    struct termios2 term;
     speed_t brate = SystemIoPortsNative_TermiosSpeed2Rate(speed);
 
     if (brate == B0)
@@ -367,19 +374,17 @@ int32_t SystemIoPortsNative_TermiosSetSpeed(intptr_t handle, int32_t speed)
         return -1;
     }
 
-    if (tcgetattr(fd, &term) < 0)
+    if (ioctl(fd, TCGETS2, &term) < 0)
     {
         return  -1;
     }
 
-#if HAVE_CFSETSPEED
-    cfsetspeed(&term, brate);
-#else // on SunOS, set input and output speeds individually
-    cfsetispeed(&term, brate);
-    cfsetospeed(&term, brate);
-#endif
+    term.c_cflag &= ~CBAUD;
+    term.c_cflag |= brate;
+    term.c_ispeed = speed;
+    term.c_ospeed = speed;
 
-    if (tcsetattr(fd, TCSANOW, &term) < 0)
+    if (ioctl(fd, TCSETS, &term) < 0)
     {
         return -2;
     }
@@ -405,47 +410,43 @@ int32_t SystemIoPortsNative_TermiosDiscard(intptr_t handle, int32_t queue)
     switch (queue)
     {
     case ReceiveQueue:
-        return tcflush(fd, TCIFLUSH);
+        return ioctl(fd, TCFLSH, TCIFLUSH);
     case SendQueue:
-        return tcflush(fd, TCOFLUSH);
+        return ioctl(fd, TCFLSH, TCOFLUSH);
     default:
-        return tcflush(fd, TCIOFLUSH);
+        return ioctl(fd, TCFLSH, TCIOFLUSH);
     }
 }
 
 int32_t SystemIoPortsNative_TermiosDrain(intptr_t handle)
 {
     int fd = ToFileDescriptor(handle);
-    return tcdrain(fd);
+    return ioctl(fd, TCSETSW);
 }
 
 int32_t SystemIoPortsNative_TermiosSendBreak(intptr_t handle, int32_t duration)
 {
     int fd = ToFileDescriptor(handle);
-    return tcsendbreak(fd, duration);
+    return ioctl(fd, TCSBRK, duration);
 }
 
 int32_t SystemIoPortsNative_TermiosReset(intptr_t handle, int32_t speed, int32_t dataBits, int32_t stopBits, int32_t parity, int32_t handshake)
 {
     int fd = ToFileDescriptor(handle);
-    struct termios term;
-    speed_t brate;
+    struct termios2 term;
     int ret = 0;
 
-    if (tcgetattr(fd, &term) < 0)
+    if (ioctl(fd, TCGETS2, &term) < 0)
     {
         return  -1;
     }
 
-#if HAVE_CFMAKERAW
-    cfmakeraw(&term);
-#else
     term.c_iflag &= ~(IMAXBEL|IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL|IXON);
     term.c_oflag &= ~OPOST;
     term.c_lflag &= ~(ECHO|ECHONL|ICANON|ISIG|IEXTEN);
     term.c_cflag &= ~(CSIZE|PARENB);
     term.c_cflag |= CS8;
-#endif
+
     term.c_cflag |=  (CLOCAL | CREAD);
     term.c_lflag &= ~((tcflag_t)(ICANON | ECHO | ECHOE | ECHOK | ECHONL | ISIG | IEXTEN ));
     term.c_oflag &= ~((tcflag_t)(OPOST));
@@ -514,27 +515,14 @@ int32_t SystemIoPortsNative_TermiosReset(intptr_t handle, int32_t speed, int32_t
     }
 
     if (speed)
-    {
-        brate = SystemIoPortsNative_TermiosSpeed2Rate(speed);
-        if (brate == B0)
-        {
-#if !HAVE_IOSS_H
-            // We can try to set non-standard speed after tcsetattr().
-            errno = EINVAL;
-            return -1;
-#endif
-        }
-        else
-        {
-#if HAVE_CFSETSPEED
-            ret = cfsetspeed(&term, brate);
-#else
-            ret = cfsetispeed(&term, brate) & cfsetospeed(&term, brate);
-#endif
-        }
+    {        
+        term.c_cflag &= ~CBAUD;
+        term.c_cflag |= BOTHER;
+        term.c_ispeed = speed;
+        term.c_ospeed = speed;
     }
 
-    if ((ret != 0) || (tcsetattr(fd, TCSANOW, &term) < 0))
+    if ((ret != 0) || (ioctl(fd, TCSETS2, &term) < 0))
     {
         return -1;
     }
